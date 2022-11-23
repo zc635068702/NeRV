@@ -244,7 +244,7 @@ def train(local_rank, args):
             sparisity_num = 0.
             for param in param_list:
                 sparisity_num += (param.weight == 0).sum()
-            print(f'Model sparsity at Epoch{args.start_epoch}: {sparisity_num / 1e6 / total_params}')
+            # print(f'Model sparsity at Epoch{args.start_epoch}: {sparisity_num / 1e6 / total_params}')
         model.load_state_dict(checkpoint['state_dict'])
         print("=> Auto resume loaded checkpoint '{}' (epoch {})".format(checkpoint_path, checkpoint['epoch']))
     else:
