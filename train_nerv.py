@@ -22,6 +22,12 @@ from tqdm import tqdm
 from model_nerv import CustomDataSet, Generator
 from utils import *
 
+'''
+# quan
+from pathlib import Path
+import quan
+import util
+'''
 
 def main():
     parser = argparse.ArgumentParser()
@@ -93,6 +99,9 @@ def main():
     parser.add_argument('--outf', default='unify', help='folder to output images and model checkpoints')
     parser.add_argument('--suffix', default='', help="suffix str for outf")
 
+    # gpu
+    parser.add_argument('--gpu_idx', type=int, default=1, help=' ')
+
     args = parser.parse_args()
         
     args.warmup = int(args.warmup * args.epochs)
@@ -118,6 +127,9 @@ def main():
             f'_gap{args.frame_gap}_e{args.epochs}_warm{args.warmup}_b{args.batchSize}_{args.conv_type}_lr{args.lr}_{args.lr_type}' + \
             f'_{args.loss_type}{norm_str}{extra_str}{prune_str}'
     
+    # zhuchen
+    args.batchSize = 3
+
     exp_id += f'_act{args.act}_{args.suffix}'
     args.exp_id = exp_id
 
@@ -138,7 +150,9 @@ def main():
     if args.distributed and args.ngpus_per_node > 1:
         mp.spawn(train, nprocs=args.ngpus_per_node, args=(args,))
     else:
-        train(None, args)
+        # train(None, args)
+        torch.cuda.set_device(args.gpu_idx)
+        train(args.gpu_idx, args)
 
 def train(local_rank, args):
     cudnn.benchmark = True
@@ -179,9 +193,18 @@ def train(local_rank, args):
                 amount=1 - prune_base_ratio ** prune_num,
             )
 
+    '''
+    ##### quan: LSQ #####
+    script_dir = Path.cwd()
+    args_quan = util.get_config(default_file=script_dir / 'config.yaml')
+    modules_to_replace = quan.find_modules_to_quantize(model, args_quan.quan)
+    model = quan.replace_module_by_names(model, modules_to_replace)
+    print('Inserted quantizers into the original model')
+    '''
+
     ##### get model params and flops #####
     total_params = sum([p.data.nelement() for p in model.parameters()]) / 1e6
-    if local_rank in [0, None]:
+    if local_rank:
         params = sum([p.data.nelement() for p in model.parameters()]) / 1e6
 
         print(f'{args}\n {model}\n Model Params: {params}M')
@@ -205,8 +228,8 @@ def train(local_rank, args):
         args.batchSize = int(args.batchSize / args.ngpus_per_node)
         model = torch.nn.parallel.DistributedDataParallel(model.to(local_rank), device_ids=[local_rank], \
                                                           output_device=local_rank, find_unused_parameters=False)
-    elif args.ngpus_per_node > 1:
-        model = torch.nn.DataParallel(model).cuda() #model.cuda() #
+    # elif args.ngpus_per_node > 1:
+    #    model = torch.nn.DataParallel(model).cuda() #model.cuda() #
     else:
         model = model.cuda()
 
@@ -355,7 +378,7 @@ def train(local_rank, args):
                     time_now_string, local_rank, epoch+1, args.epochs, i+1, len(train_dataloader), lr, 
                     RoundTensor(train_psnr, 2, False), RoundTensor(train_msssim, 4, False))
                 print(print_str, flush=True)
-                if local_rank in [0, None]:
+                if local_rank:
                     with open('{}/rank0.txt'.format(args.outf), 'a') as f:
                         f.write(print_str + '\n')
 
@@ -365,7 +388,7 @@ def train(local_rank, args):
             train_msssim = all_reduce([train_msssim.to(local_rank)])
 
         # ADD train_PSNR TO TENSORBOARD
-        if local_rank in [0, None]:
+        if local_rank:
             h, w = output_list[-1].shape[-2:]
             is_train_best = train_psnr[-1] > train_best_psnr
             train_best_psnr = train_psnr[-1] if train_psnr[-1] > train_best_psnr else train_best_psnr
@@ -401,7 +424,7 @@ def train(local_rank, args):
             if args.distributed and args.ngpus_per_node > 1:
                 val_psnr = all_reduce([val_psnr.to(local_rank)])
                 val_msssim = all_reduce([val_msssim.to(local_rank)])            
-            if local_rank in [0, None]:
+            if local_rank:
                 # ADD val_PSNR TO TENSORBOARD
                 h, w = output_list[-1].shape[-2:]
                 print_str = f'Eval best_PSNR at epoch{epoch+1}:'
@@ -420,7 +443,7 @@ def train(local_rank, args):
                 if is_val_best:
                     torch.save(save_checkpoint, '{}/model_val_best.pth'.format(args.outf))
 
-        if local_rank in [0, None]:
+        if local_rank:
             # state_dict = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
             torch.save(save_checkpoint, '{}/model_latest.pth'.format(args.outf))
             if is_train_best:
@@ -460,9 +483,11 @@ def evaluate(model, val_dataloader, pe, local_rank, args):
         encoding_efficiency = avg_bits / args.quant_bit
         print_str = f'Entropy encoding efficiency for bit {args.quant_bit}: {encoding_efficiency}'
         print(print_str)
-        if local_rank in [0, None]:
+        print_bits = f'total_bits: {total_bits}'
+        if local_rank:
             with open('{}/eval.txt'.format(args.outf), 'a') as f:
-                f.write(print_str + '\n')       
+                f.write(print_str + '\n')
+                f.write(print_bits + '\n')
         model.load_state_dict(cur_ckt)
 
         # import pdb; pdb.set_trace; from IPython import embed; embed()
@@ -520,7 +545,7 @@ def evaluate(model, val_dataloader, pe, local_rank, args):
                 local_rank, i+1, len(val_dataloader),
                 RoundTensor(val_psnr, 2, False), RoundTensor(val_msssim, 4, False), round(fps, 2))
             print(print_str)
-            if local_rank in [0, None]:
+            if local_rank:
                 with open('{}/rank0.txt'.format(args.outf), 'a') as f:
                     f.write(print_str + '\n')
     model.train()
